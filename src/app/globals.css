@@ -1,0 +1,94 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  }
+  
+  body {
+    @apply bg-gray-50 text-gray-900;
+  }
+}
+
+@layer components {
+  .chat-message {
+    @apply rounded-lg px-4 py-3 max-w-3xl;
+  }
+  
+  .chat-message.user {
+    @apply bg-primary-600 text-white ml-auto;
+  }
+  
+  .chat-message.assistant {
+    @apply bg-white border border-gray-200 mr-auto;
+  }
+  
+  .quick-start-button {
+    @apply bg-white border border-gray-200 rounded-lg p-4 text-left hover:border-primary-300 hover:bg-primary-50 transition-all duration-200 cursor-pointer;
+  }
+  
+  .quick-start-button:hover {
+    @apply shadow-sm;
+  }
+  
+  .typing-indicator {
+    @apply flex space-x-1;
+  }
+  
+  .typing-dot {
+    @apply w-2 h-2 bg-gray-400 rounded-full animate-pulse;
+    animation-delay: var(--delay);
+  }
+}
+
+/* Custom scrollbar */
+.chat-container::-webkit-scrollbar {
+  width: 6px;
+}
+
+.chat-container::-webkit-scrollbar-track {
+  background: #f1f5f9;
+}
+
+.chat-container::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 3px;
+}
+
+.chat-container::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+/* Markdown styling */
+.markdown-content {
+  @apply prose prose-sm max-w-none;
+}
+
+.markdown-content h1,
+.markdown-content h2,
+.markdown-content h3 {
+  @apply text-gray-900 font-semibold;
+}
+
+.markdown-content p {
+  @apply text-gray-700 leading-relaxed;
+}
+
+.markdown-content ul,
+.markdown-content ol {
+  @apply text-gray-700;
+}
+
+.markdown-content code {
+  @apply bg-gray-100 text-gray-800 px-1 py-0.5 rounded text-sm;
+}
+
+.markdown-content pre {
+  @apply bg-gray-900 text-gray-100 p-4 rounded-lg overflow-x-auto;
+}
+
+.markdown-content pre code {
+  @apply bg-transparent text-gray-100 p-0;
+}

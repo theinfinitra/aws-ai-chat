@@ -1,0 +1,44 @@
+{
+  "name": "aws-ai-chat",
+  "version": "1.0.0",
+  "private": true,
+  "description": "AWS AI Chat Application with Real-time Streaming",
+  "scripts": {
+    "dev": "next dev --turbopack",
+    "build": "next build",
+    "build:production": "ESLINT_NO_DEV_ERRORS=true next build",
+    "start": "next start",
+    "lint": "next lint",
+    "lint:fix": "next lint --fix",
+    "type-check": "tsc --noEmit",
+    "deploy:dev": "cd aws-infrastructure && make deploy-dev",
+    "deploy:prod": "cd aws-infrastructure && make deploy-prod",
+    "clean": "rm -rf .next out node_modules/.cache",
+    "precommit": "npm run lint && npm run type-check"
+  },
+  "dependencies": {
+    "@aws-sdk/client-apigatewaymanagementapi": "^3.848.0",
+    "@aws-sdk/client-bedrock-runtime": "^3.490.0",
+    "@aws-sdk/credential-providers": "^3.830.0",
+    "@heroicons/react": "^2.2.0",
+    "@tailwindcss/typography": "^0.5.16",
+    "framer-motion": "^12.23.9",
+    "next": "15.3.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-markdown": "^9.0.1",
+    "react-syntax-highlighter": "^15.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "@types/react-syntax-highlighter": "^15.5.13",
+    "autoprefixer": "^10.4.21",
+    "eslint": "^9",
+    "eslint-config-next": "15.3.0",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^3.4.17",
+    "typescript": "^5.8.3"
+  }
+}

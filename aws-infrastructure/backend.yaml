@@ -1,0 +1,696 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'AI Chat Standalone - Backend Infrastructure'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, prod]
+    Description: Environment name
+  
+  ProjectName:
+    Type: String
+    Default: aws-ai-chat
+    Description: Project name for resource naming
+  
+  BedrockModelId:
+    Type: String
+    Default: amazon.nova-pro-v1:0
+    Description: Bedrock model ID to use for chat
+  
+  AllowedOrigins:
+    Type: CommaDelimitedList
+    Default: "http://localhost:3000,https://localhost:3000"
+    Description: Allowed CORS origins for the API
+
+Resources:
+  # IAM Role for API Gateway to invoke Lambda
+  ApiGatewayRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-${Environment}-api-gateway-role"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: apigateway.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
+
+  # IAM Role for Lambda function
+  ChatLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-${Environment}-lambda-role"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: BedrockAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource: 
+                  - !Sub "arn:aws:bedrock:${AWS::Region}::foundation-model/${BedrockModelId}"
+                  - !Sub "arn:aws:bedrock:${AWS::Region}::foundation-model/amazon.nova-*"
+        - PolicyName: ApiGatewayManagementAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - execute-api:ManageConnections
+                Resource: 
+                  - !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:*/*/*"
+
+  # Lambda function for chat API
+  ChatLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-${Environment}-chat"
+      Runtime: nodejs18.x
+      Handler: index.handler
+      Role: !GetAtt ChatLambdaRole.Arn
+      Timeout: 30
+      MemorySize: 512
+      Environment:
+        Variables:
+          BEDROCK_MODEL_ID: !Ref BedrockModelId
+          ENV_REGION: !Ref AWS::Region
+          ENVIRONMENT: !Ref Environment
+      Code:
+        ZipFile: |
+          const { BedrockRuntimeClient, InvokeModelCommand } = require('@aws-sdk/client-bedrock-runtime');
+          
+          const bedrockClient = new BedrockRuntimeClient({
+            region: process.env.ENV_REGION
+          });
+          
+          const MODEL_ID = process.env.BEDROCK_MODEL_ID || 'amazon.nova-pro-v1:0';
+          
+          // Basic content filtering
+          function applyBasicFiltering(content) {
+            const blockedPatterns = [
+              /\b(spam|inappropriate|offensive)\b/i,
+            ];
+            
+            for (const pattern of blockedPatterns) {
+              if (pattern.test(content)) {
+                return {
+                  isBlocked: true,
+                  reason: 'Content contains inappropriate language',
+                };
+              }
+            }
+            
+            return { isBlocked: false };
+          }
+          
+          // Invoke Bedrock model
+          async function invokeModel(prompt, conversationHistory = []) {
+            const systemPrompt = `You are a helpful, knowledgeable, and professional AI assistant. You provide accurate, clear, and useful responses to a wide variety of questions and tasks.
+
+          ## Your Capabilities:
+          - Answer questions on diverse topics including technology, science, business, arts, and general knowledge
+          - Help with problem-solving and analysis
+          - Assist with writing, editing, and creative tasks
+          - Provide explanations and tutorials
+          - Offer guidance on learning and skill development
+          - Help with coding and technical questions
+          - Support business and professional tasks
+
+          ## Response Guidelines:
+          1. **Be Helpful**: Provide comprehensive and actionable responses
+          2. **Be Accurate**: Only provide information you're confident about
+          3. **Be Clear**: Use clear language appropriate for the user's level
+          4. **Be Professional**: Maintain a friendly but professional tone
+          5. **Be Concise**: Provide thorough answers without unnecessary verbosity
+          6. **Be Safe**: Avoid harmful, inappropriate, or misleading content
+
+          You should be conversational and engaging while maintaining professionalism.`;
+          
+            const command = new InvokeModelCommand({
+              modelId: MODEL_ID,
+              body: JSON.stringify({
+                schemaVersion: 'messages-v1',
+                system: [{ text: systemPrompt }],
+                messages: [
+                  ...conversationHistory.slice(-5).map(msg => ({
+                    role: msg.role,
+                    content: [{ text: msg.content }]
+                  })),
+                  {
+                    role: 'user',
+                    content: [{ text: prompt }]
+                  }
+                ],
+                inferenceConfig: {
+                  maxTokens: 2000,
+                  temperature: 0.7,
+                  topP: 0.9
+                }
+              }),
+              contentType: 'application/json',
+              accept: 'application/json',
+            });
+          
+            const response = await bedrockClient.send(command);
+            const responseBody = JSON.parse(new TextDecoder().decode(response.body));
+            
+            return responseBody.output.message.content[0].text;
+          }
+          
+          exports.handler = async (event) => {
+            const headers = {
+              'Content-Type': 'application/json',
+              'Access-Control-Allow-Origin': '*',
+              'Access-Control-Allow-Methods': 'POST, OPTIONS',
+              'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+            };
+          
+            // Handle preflight requests
+            if (event.httpMethod === 'OPTIONS') {
+              return {
+                statusCode: 200,
+                headers,
+                body: '',
+              };
+            }
+          
+            try {
+              const body = JSON.parse(event.body || '{}');
+              const { message, conversationHistory = [], sessionId } = body;
+          
+              // Validate input
+              if (!message || message.trim().length === 0) {
+                return {
+                  statusCode: 400,
+                  headers,
+                  body: JSON.stringify({ error: 'Message is required' }),
+                };
+              }
+          
+              if (message.length > 4000) {
+                return {
+                  statusCode: 400,
+                  headers,
+                  body: JSON.stringify({ error: 'Message is too long. Please keep it under 4000 characters.' }),
+                };
+              }
+          
+              // Apply basic filtering
+              const filterResult = applyBasicFiltering(message);
+              if (filterResult.isBlocked) {
+                return {
+                  statusCode: 400,
+                  headers,
+                  body: JSON.stringify({
+                    error: 'Content blocked by safety guidelines',
+                    reason: filterResult.reason,
+                    blocked: true
+                  }),
+                };
+              }
+          
+              // Get response from Bedrock
+              const response = await invokeModel(message, conversationHistory);
+          
+              // Apply basic filtering to response
+              const responseFilterResult = applyBasicFiltering(response);
+              if (responseFilterResult.isBlocked) {
+                return {
+                  statusCode: 400,
+                  headers,
+                  body: JSON.stringify({
+                    error: 'Response blocked by safety guidelines',
+                    blocked: true
+                  }),
+                };
+              }
+          
+              return {
+                statusCode: 200,
+                headers,
+                body: JSON.stringify({
+                  response,
+                  timestamp: new Date().toISOString(),
+                  sessionId: sessionId || require('crypto').randomUUID(),
+                }),
+              };
+          
+            } catch (error) {
+              console.error('Chat API Error:', error);
+              
+              return {
+                statusCode: 500,
+                headers,
+                body: JSON.stringify({
+                  error: 'I apologize, but I encountered an error processing your request. Please try again.',
+                  details: process.env.ENVIRONMENT === 'dev' ? error.message : undefined
+                }),
+              };
+            }
+          };
+
+  # API Gateway
+  ChatApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub "${ProjectName}-${Environment}-api"
+      Description: AI Chat API
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+
+  # API Gateway Resource
+  ChatResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ChatApi
+      ParentId: !GetAtt ChatApi.RootResourceId
+      PathPart: chat
+
+  # API Gateway Method
+  ChatMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ChatApi
+      ResourceId: !Ref ChatResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ChatLambdaFunction.Arn}/invocations"
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+        - StatusCode: 400
+        - StatusCode: 500
+
+  # CORS Options Method
+  ChatOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ChatApi
+      ResourceId: !Ref ChatResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+            ResponseTemplates:
+              application/json: ''
+        PassthroughBehavior: WHEN_NO_MATCH
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  # API Gateway Deployment
+  ChatApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - ChatMethod
+      - ChatOptionsMethod
+    Properties:
+      RestApiId: !Ref ChatApi
+      StageName: !Ref Environment
+
+  # Lambda permission for API Gateway
+  ChatLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ChatLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ChatApi}/*/*/*"
+
+  # WebSocket Lambda function for real-time chat
+  WebSocketLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-${Environment}-websocket"
+      Runtime: nodejs18.x
+      Handler: index.handler
+      Role: !GetAtt ChatLambdaRole.Arn
+      Timeout: 30
+      MemorySize: 512
+      Environment:
+        Variables:
+          BEDROCK_MODEL_ID: !Ref BedrockModelId
+          ENV_REGION: !Ref AWS::Region
+          ENVIRONMENT: !Ref Environment
+      Code:
+        ZipFile: |
+          const { BedrockRuntimeClient, InvokeModelWithResponseStreamCommand } = require('@aws-sdk/client-bedrock-runtime');
+          const { ApiGatewayManagementApiClient, PostToConnectionCommand } = require('@aws-sdk/client-apigatewaymanagementapi');
+          
+          const bedrockClient = new BedrockRuntimeClient({
+            region: process.env.ENV_REGION
+          });
+          
+          const MODEL_ID = process.env.BEDROCK_MODEL_ID || 'amazon.nova-pro-v1:0';
+          
+          // Basic content filtering
+          function applyBasicFiltering(content) {
+            const blockedPatterns = [
+              /\b(spam|inappropriate|offensive)\b/i,
+            ];
+            
+            for (const pattern of blockedPatterns) {
+              if (pattern.test(content)) {
+                return {
+                  isBlocked: true,
+                  reason: 'Content contains inappropriate language',
+                };
+              }
+            }
+            
+            return { isBlocked: false };
+          }
+          
+          // Send message to WebSocket connection
+          async function sendToConnection(connectionId, data, apiGatewayEndpoint) {
+            const client = new ApiGatewayManagementApiClient({
+              endpoint: apiGatewayEndpoint,
+              region: process.env.ENV_REGION
+            });
+            
+            try {
+              await client.send(new PostToConnectionCommand({
+                ConnectionId: connectionId,
+                Data: JSON.stringify(data)
+              }));
+              return true;
+            } catch (error) {
+              console.error('Failed to send to connection:', error);
+              return false;
+            }
+          }
+          
+          // Stream response from Bedrock
+          async function streamResponse(prompt, conversationHistory, connectionId, apiGatewayEndpoint) {
+            const systemPrompt = `You are a helpful, knowledgeable, and professional AI assistant. You provide accurate, clear, and useful responses to a wide variety of questions and tasks.
+
+          ## Your Capabilities:
+          - Answer questions on diverse topics including technology, science, business, arts, and general knowledge
+          - Help with problem-solving and analysis
+          - Assist with writing, editing, and creative tasks
+          - Provide explanations and tutorials
+          - Offer guidance on learning and skill development
+          - Help with coding and technical questions
+          - Support business and professional tasks
+
+          ## Response Guidelines:
+          1. **Be Helpful**: Provide comprehensive and actionable responses
+          2. **Be Accurate**: Only provide information you're confident about
+          3. **Be Clear**: Use clear language appropriate for the user's level
+          4. **Be Professional**: Maintain a friendly but professional tone
+          5. **Be Concise**: Provide thorough answers without unnecessary verbosity
+          6. **Be Safe**: Avoid harmful, inappropriate, or misleading content
+
+          You should be conversational and engaging while maintaining professionalism.`;
+          
+            const messages = [];
+            const processedHistory = conversationHistory.slice(-10);
+            let lastRole = null;
+
+            for (const msg of processedHistory) {
+              if (msg.role !== lastRole) {
+                messages.push({
+                  role: msg.role,
+                  content: [{ text: msg.content }]
+                });
+                lastRole = msg.role;
+              }
+            }
+
+            if (lastRole !== 'user') {
+              messages.push({
+                role: 'user',
+                content: [{ text: prompt }]
+              });
+            } else {
+              messages.push({
+                role: 'assistant',
+                content: [{ text: 'I understand. Let me help you with that.' }]
+              });
+              messages.push({
+                role: 'user',
+                content: [{ text: prompt }]
+              });
+            }
+            
+            const command = new InvokeModelWithResponseStreamCommand({
+              modelId: MODEL_ID,
+              body: JSON.stringify({
+                schemaVersion: 'messages-v1',
+                system: [{ text: systemPrompt }],
+                messages: messages,
+                inferenceConfig: {
+                  maxTokens: 2000,
+                  temperature: 0.7,
+                  topP: 0.9
+                }
+              }),
+              contentType: 'application/json',
+              accept: 'application/json',
+            });
+
+            const response = await bedrockClient.send(command);
+            
+            if (!response.body) {
+              throw new Error('No response body received');
+            }
+
+            try {
+              for await (const chunk of response.body) {
+                if (chunk.chunk?.bytes) {
+                  const chunkData = JSON.parse(new TextDecoder().decode(chunk.chunk.bytes));
+                  
+                  if (chunkData.contentBlockDelta?.delta?.text) {
+                    const text = chunkData.contentBlockDelta.delta.text;
+                    await sendToConnection(connectionId, {
+                      type: 'chunk',
+                      content: text,
+                      timestamp: new Date().toISOString()
+                    }, apiGatewayEndpoint);
+                  } else if (chunkData.messageStop) {
+                    await sendToConnection(connectionId, {
+                      type: 'complete',
+                      timestamp: new Date().toISOString()
+                    }, apiGatewayEndpoint);
+                    break;
+                  }
+                }
+              }
+            } catch (error) {
+              console.error('Streaming error:', error);
+              await sendToConnection(connectionId, {
+                type: 'error',
+                error: 'Streaming failed',
+                timestamp: new Date().toISOString()
+              }, apiGatewayEndpoint);
+            }
+          }
+          
+          exports.handler = async (event) => {
+            const { requestContext, body } = event;
+            const { connectionId, routeKey, domainName, stage } = requestContext;
+            const apiGatewayEndpoint = `https://${domainName}/${stage}`;
+            
+            console.log('WebSocket event:', { routeKey, connectionId });
+            
+            try {
+              if (routeKey === '$connect') {
+                // Handle connection
+                console.log('Client connected:', connectionId);
+                return { statusCode: 200 };
+              } else if (routeKey === '$disconnect') {
+                // Handle disconnection
+                console.log('Client disconnected:', connectionId);
+                return { statusCode: 200 };
+              } else if (routeKey === 'message') {
+                // Handle message
+                const data = JSON.parse(body || '{}');
+                const { message, conversationHistory = [] } = data;
+                
+                if (!message || message.trim().length === 0) {
+                  await sendToConnection(connectionId, {
+                    type: 'error',
+                    error: 'Message is required'
+                  }, apiGatewayEndpoint);
+                  return { statusCode: 400 };
+                }
+                
+                if (message.length > 4000) {
+                  await sendToConnection(connectionId, {
+                    type: 'error',
+                    error: 'Message is too long. Please keep it under 4000 characters.'
+                  }, apiGatewayEndpoint);
+                  return { statusCode: 400 };
+                }
+                
+                // Apply basic filtering
+                const filterResult = applyBasicFiltering(message);
+                if (filterResult.isBlocked) {
+                  await sendToConnection(connectionId, {
+                    type: 'error',
+                    error: 'Content blocked by safety guidelines',
+                    reason: filterResult.reason
+                  }, apiGatewayEndpoint);
+                  return { statusCode: 400 };
+                }
+                
+                // Stream response
+                await streamResponse(message, conversationHistory, connectionId, apiGatewayEndpoint);
+                
+                return { statusCode: 200 };
+              }
+              
+              return { statusCode: 404 };
+              
+            } catch (error) {
+              console.error('WebSocket handler error:', error);
+              
+              try {
+                await sendToConnection(connectionId, {
+                  type: 'error',
+                  error: 'Internal server error',
+                  details: process.env.ENVIRONMENT === 'dev' ? error.message : undefined
+                }, apiGatewayEndpoint);
+              } catch (sendError) {
+                console.error('Failed to send error message:', sendError);
+              }
+              
+              return { statusCode: 500 };
+            }
+          };
+
+  # WebSocket API Gateway
+  WebSocketApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub "${ProjectName}-${Environment}-websocket-api"
+      Description: AI Chat WebSocket API
+      ProtocolType: WEBSOCKET
+      RouteSelectionExpression: $request.body.action
+
+  # WebSocket API Deployment
+  WebSocketApiDeployment:
+    Type: AWS::ApiGatewayV2::Deployment
+    DependsOn:
+      - ConnectRoute
+      - DisconnectRoute
+      - MessageRoute
+    Properties:
+      ApiId: !Ref WebSocketApi
+
+  # WebSocket API Stage
+  WebSocketApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref WebSocketApi
+      DeploymentId: !Ref WebSocketApiDeployment
+      StageName: !Ref Environment
+
+  # WebSocket Routes
+  ConnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: $connect
+      Target: !Sub "integrations/${ConnectIntegration}"
+
+  DisconnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: $disconnect
+      Target: !Sub "integrations/${DisconnectIntegration}"
+
+  MessageRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: message
+      Target: !Sub "integrations/${MessageIntegration}"
+
+  # WebSocket Integrations
+  ConnectIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${WebSocketLambdaFunction.Arn}/invocations"
+
+  DisconnectIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${WebSocketLambdaFunction.Arn}/invocations"
+
+  MessageIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${WebSocketLambdaFunction.Arn}/invocations"
+
+  # Lambda permissions for WebSocket API
+  WebSocketLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref WebSocketLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*/*"
+
+Outputs:
+  ApiGatewayUrl:
+    Description: API Gateway URL for the chat endpoint
+    Value: !Sub "https://${ChatApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}/chat"
+    Export:
+      Name: !Sub "${ProjectName}-${Environment}-api-url"
+  
+  WebSocketApiUrl:
+    Description: WebSocket API URL for real-time chat
+    Value: !Sub "wss://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}"
+    Export:
+      Name: !Sub "${ProjectName}-${Environment}-websocket-url"
+  
+  LambdaFunctionArn:
+    Description: Lambda function ARN
+    Value: !GetAtt ChatLambdaFunction.Arn
+    Export:
+      Name: !Sub "${ProjectName}-${Environment}-lambda-arn"
+  
+  WebSocketLambdaFunctionArn:
+    Description: WebSocket Lambda function ARN
+    Value: !GetAtt WebSocketLambdaFunction.Arn
+    Export:
+      Name: !Sub "${ProjectName}-${Environment}-websocket-lambda-arn"

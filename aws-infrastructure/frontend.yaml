@@ -1,0 +1,161 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'AI Chat Standalone - Frontend Infrastructure (Amplify)'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, prod]
+    Description: Environment name
+  
+  ProjectName:
+    Type: String
+    Default: aws-ai-chat
+    Description: Project name for resource naming
+  
+  GitHubRepository:
+    Type: String
+    Description: GitHub repository URL (e.g., https://github.com/username/aws-ai-chat)
+    Default: ""
+  
+  GitHubBranch:
+    Type: String
+    Default: main
+    Description: GitHub branch to deploy
+  
+  GitHubToken:
+    Type: String
+    NoEcho: true
+    Description: GitHub personal access token
+    Default: ""
+  
+  CustomDomain:
+    Type: String
+    Description: Custom domain name (optional)
+    Default: ""
+
+Conditions:
+  HasGitHubRepo: !Not [!Equals [!Ref GitHubRepository, ""]]
+  HasGitHubToken: !Not [!Equals [!Ref GitHubToken, ""]]
+  HasCustomDomain: !Not [!Equals [!Ref CustomDomain, ""]]
+  EnableGitHub: !And [!Condition HasGitHubRepo, !Condition HasGitHubToken]
+  IsProdEnvironment: !Equals [!Ref Environment, prod]
+
+Resources:
+  # IAM Role for Amplify
+  AmplifyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-${Environment}-amplify-role"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: amplify.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess-Amplify
+
+  # Amplify App
+  AmplifyApp:
+    Type: AWS::Amplify::App
+    Properties:
+      Name: !Sub "${ProjectName}-${Environment}"
+      Description: AI Chat Standalone Application
+      Repository: !If [EnableGitHub, !Ref GitHubRepository, !Ref "AWS::NoValue"]
+      AccessToken: !If [EnableGitHub, !Ref GitHubToken, !Ref "AWS::NoValue"]
+      IAMServiceRole: !GetAtt AmplifyRole.Arn
+      Platform: WEB
+      BuildSpec: |
+        version: 1
+        applications:
+          - frontend:
+              phases:
+                preBuild:
+                  commands:
+                    - npm ci
+                build:
+                  commands:
+                    - npm run build
+              artifacts:
+                baseDirectory: .next
+                files:
+                  - '**/*'
+              cache:
+                paths:
+                  - node_modules/**/*
+                  - .next/cache/**/*
+            appRoot: /
+      EnvironmentVariables:
+        - Name: AMPLIFY_MONOREPO_APP_ROOT
+          Value: /
+        - Name: AMPLIFY_DIFF_DEPLOY
+          Value: false
+        - Name: _LIVE_UPDATES
+          Value: '[{"name":"Node.js version","pkg":"node","type":"nvm","version":"18"}]'
+      CustomRules:
+        - Source: /<*>
+          Target: /index.html
+          Status: 404-200
+
+  # Amplify Branch
+  AmplifyBranch:
+    Type: AWS::Amplify::Branch
+    Properties:
+      AppId: !GetAtt AmplifyApp.AppId
+      BranchName: !Ref GitHubBranch
+      Description: !Sub "${Environment} branch"
+      EnableAutoBuild: !If [EnableGitHub, true, false]
+      EnablePullRequestPreview: false
+      EnvironmentVariables:
+        - Name: NEXT_PUBLIC_API_URL
+          Value: !Sub 
+            - "https://${ApiId}.execute-api.${AWS::Region}.amazonaws.com/${Environment}"
+            - ApiId: 
+                Fn::ImportValue: !Sub "${ProjectName}-${Environment}-api-url"
+        - Name: NODE_ENV
+          Value: !If 
+            - IsProdEnvironment
+            - production
+            - development
+
+  # Custom Domain (optional)
+  AmplifyDomain:
+    Type: AWS::Amplify::Domain
+    Condition: HasCustomDomain
+    Properties:
+      AppId: !GetAtt AmplifyApp.AppId
+      DomainName: !Ref CustomDomain
+      SubDomainSettings:
+        - Prefix: !If 
+            - IsProdEnvironment
+            - ""
+            - !Ref Environment
+          BranchName: !Ref GitHubBranch
+
+Outputs:
+  AmplifyAppId:
+    Description: Amplify App ID
+    Value: !GetAtt AmplifyApp.AppId
+    Export:
+      Name: !Sub "${ProjectName}-${Environment}-amplify-app-id"
+  
+  AmplifyAppUrl:
+    Description: Amplify App URL
+    Value: !Sub "https://${GitHubBranch}.${AmplifyApp.DefaultDomain}"
+    Export:
+      Name: !Sub "${ProjectName}-${Environment}-amplify-url"
+  
+  CustomDomainUrl:
+    Condition: HasCustomDomain
+    Description: Custom domain URL
+    Value: !Sub 
+      - "https://${Prefix}${Domain}"
+      - Prefix: !If 
+          - IsProdEnvironment
+          - ""
+          - !Sub "${Environment}."
+        Domain: !Ref CustomDomain
+    Export:
+      Name: !Sub "${ProjectName}-${Environment}-custom-domain-url"

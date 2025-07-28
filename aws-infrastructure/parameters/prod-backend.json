@@ -1,0 +1,18 @@
+[
+  {
+    "ParameterKey": "Environment",
+    "ParameterValue": "prod"
+  },
+  {
+    "ParameterKey": "ProjectName",
+    "ParameterValue": "aws-ai-chat"
+  },
+  {
+    "ParameterKey": "BedrockModelId",
+    "ParameterValue": "amazon.nova-pro-v1:0"
+  },
+  {
+    "ParameterKey": "AllowedOrigins",
+    "ParameterValue": "https://your-domain.com,https://www.your-domain.com"
+  }
+]
